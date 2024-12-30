@@ -1,0 +1,1058 @@
+package data
+
+import (
+	"context"
+	"fmt"
+	"github.com/Ahmad-mufied/iducate-community-service/utils"
+	"github.com/xeonx/timeago"
+	"time"
+)
+
+type Post struct {
+	ID        uint      `json:"id" db:"id"`                 // Primary key
+	UserID    string    `json:"user_id" db:"user_id"`       // Foreign key referencing User
+	Title     string    `json:"title" db:"title"`           // Post title
+	Content   string    `json:"content" db:"content"`       // Post content
+	Views     int       `json:"views" db:"views"`           // Number of views
+	CreatedAt time.Time `json:"created_at" db:"created_at"` // Timestamp for record creation
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"` // Timestamp for last update
+}
+
+type PostResponse struct {
+	ID           uint   `db:"id" json:"id"`
+	Title        string `db:"title" json:"title"`
+	Content      string `db:"content" json:"content"`
+	Views        int    `db:"views" json:"views"`
+	Author       string `db:"author" json:"author"`
+	LikeCount    int    `db:"like_count" json:"like_count"`
+	CommentCount int    `db:"comment_count" json:"comment_count"`
+	CreatedAt    string `db:"created_at" json:"created_at"`
+}
+
+type CreatePostRequest struct {
+	UserID  string `json:"user_id" validate:"required"`
+	Title   string `json:"title" validate:"required,max=255"`
+	Content string `json:"content" validate:"required"`
+}
+
+func (p *Post) CreatePost(ctx context.Context, req *CreatePostRequest) (PostResponse, error) {
+	query := `
+        INSERT INTO posts (user_id, title, content, created_at, updated_at)
+        VALUES ($1, $2, $3, NOW(), NOW())
+        RETURNING id, user_id, title, content, views, created_at, updated_at;
+    `
+
+	var post Post
+	err := db.GetContext(ctx, &post, query, req.UserID, req.Title, req.Content)
+	if err != nil {
+		return PostResponse{}, fmt.Errorf("failed to create post: %w", err)
+	}
+
+	// convert the timestamp to a string
+	timestring := timeago.English.Format(post.CreatedAt)
+
+	// return the created post with post response
+	var postResponse PostResponse
+	postResponse.ID = post.ID
+	postResponse.Title = post.Title
+	postResponse.Content = post.Content
+	postResponse.Views = post.Views
+	postResponse.Author = post.UserID
+	postResponse.CreatedAt = timestring
+
+	return postResponse, nil
+}
+
+func (p *Post) GetPaginatedPosts(query PaginatedFeedQuery) ([]PostResponse, error) {
+	// Dynamically construct the ORDER BY clause
+	orderBy := ""
+	switch query.SortType {
+	case "trend":
+		orderBy = fmt.Sprintf("COUNT(DISTINCT likes.id) %s", query.Sort)
+	case "latest":
+		orderBy = fmt.Sprintf("MAX(posts.created_at) %s", query.Sort)
+	default:
+		// This should never happen because `query.SortType` is already validated
+		return nil, fmt.Errorf("unexpected sortType: %s", query.SortType)
+	}
+
+	// Construct the SQL query
+	sqlQuery := fmt.Sprintf(`
+        SELECT
+            posts.id,
+            posts.title,
+            posts.content,
+            posts.views,
+            users.username AS author,
+            COUNT(DISTINCT likes.id) AS like_count,
+            COUNT(DISTINCT comments.id) AS comment_count,
+            posts.created_at
+        FROM posts
+        LEFT JOIN likes ON likes.post_id = posts.id
+        LEFT JOIN comments ON comments.post_id = posts.id
+        JOIN users ON posts.user_id = users.id
+        GROUP BY posts.id, users.username, posts.created_at
+        ORDER BY %s
+        LIMIT $1 OFFSET $2;
+    `, orderBy)
+
+	// Execute the query
+	var posts []PostResponse
+	err := db.Select(&posts, sqlQuery, query.Limit, query.Offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch posts: %w", err)
+	}
+
+	// Convert the timestamp to a string
+	for i := range posts {
+		timestamp := posts[i].CreatedAt
+		timestring, _ := utils.ParsePostgresTimestamp(timestamp)
+		posts[i].CreatedAt = timeago.English.Format(timestring)
+	}
+
+	return posts, nil
+}
+
+func (p *Post) GetPostDetailWithComments(ctx context.Context, postID uint) (*PostResponse, []*CommentResponse, error) {
+	query1 := `
+        SELECT
+    posts.id,
+    posts.title,
+    posts.content,
+    posts.views,
+    users.username AS author,
+    COUNT(DISTINCT likes.id) AS like_count,
+    COUNT(DISTINCT comments.id) AS comment_count,
+    posts.created_at
+FROM posts
+         LEFT JOIN likes ON likes.post_id = posts.id
+         LEFT JOIN comments ON comments.post_id = posts.id
+         JOIN users ON posts.user_id = users.id
+WHERE posts.id = $1
+GROUP BY posts.id, users.username, posts.created_at;
+    `
+
+	postDetail := new(PostResponse)
+	err := db.GetContext(ctx, postDetail, query1, postID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch post details: %w", err)
+	}
+
+	// Convert the timestamp to a string
+	timestamp := postDetail.CreatedAt
+	timestring, _ := utils.ParsePostgresTimestamp(timestamp)
+	postDetail.CreatedAt = timeago.English.Format(timestring)
+
+	query2 := `
+SELECT comments.id, users.username, comments.content, comments.created_at
+FROM comments
+    JOIN posts ON comments.post_id = posts.id
+    JOIN users ON comments.user_id = users.id
+         WHERE posts.id = $1;`
+
+	var comments []*CommentResponse
+	err = db.SelectContext(ctx, &comments, query2, postID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch comments: %w", err)
+	}
+
+	// Convert the timestamp to a string
+	for i := range comments {
+		timestamp := comments[i].CreatedAt
+		timestring, _ := utils.ParsePostgresTimestamp(timestamp)
+		comments[i].CreatedAt = timeago.English.Format(timestring)
+	}
+
+	return postDetail, comments, nil
+}
+
+func (p *Post) IncrementPostViews(ctx context.Context, postID uint) error {
+	query := `UPDATE posts SET views = views + 1 WHERE id = $1;`
+
+	_, err := db.ExecContext(ctx, query, postID)
+	if err != nil {
+		return fmt.Errorf("failed to increment views for post ID %d: %w", postID, err)
+	}
+
+	return nil
+}
+
+func (p *Post) CheckPostByID(ctx context.Context, postID uint) (bool, error) {
+	query := `SELECT 1 FROM posts WHERE id = $1;`
+
+	var exists bool
+	err := db.GetContext(ctx, &exists, query, postID)
+	if err != nil {
+		return false, fmt.Errorf("failed to check post existence: %w", err)
+	}
+
+	return exists, nil
+}
+
+func (p *Post) DeletePost(ctx context.Context, postID uint) error {
+	query := `DELETE FROM posts WHERE id = $1;`
+
+	result, err := db.ExecContext(ctx, query, postID)
+	if err != nil {
+		return fmt.Errorf("failed to delete post: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("no post found with the given ID")
+	}
+
+	return nil
+}
+
+package data
+
+import (
+	"context"
+	"fmt"
+)
+
+type Like struct{}
+
+func (l *Like) AddLike(ctx context.Context, userID string, postID int) error {
+	query := `
+        INSERT INTO likes (user_id, post_id, created_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT DO NOTHING; -- Avoid duplicate likes
+    `
+	_, err := db.ExecContext(ctx, query, userID, postID)
+	if err != nil {
+		return fmt.Errorf("failed to add like: %w", err)
+	}
+	return nil
+}
+
+func (l *Like) RemoveLike(ctx context.Context, userID string, postID int) error {
+	query := `DELETE FROM likes WHERE user_id = $1 AND post_id = $2;`
+	_, err := db.ExecContext(ctx, query, userID, postID)
+	if err != nil {
+		return fmt.Errorf("failed to remove like: %w", err)
+	}
+	return nil
+}
+
+func (l *Like) CountLikes(ctx context.Context, postID int) (int, error) {
+	query := `
+        SELECT COUNT(*)
+        FROM likes
+        WHERE post_id = $1;
+    `
+	var likeCount int
+	err := db.GetContext(ctx, &likeCount, query, postID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count likes: %w", err)
+	}
+	return likeCount, nil
+}
+
+package data
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"github.com/xeonx/timeago"
+	"time"
+)
+
+type Comment struct {
+	ID        uint      `json:"id" db:"id"`                 // Primary key
+	PostID    uint      `json:"post_id" db:"post_id"`       // Foreign key referencing Post
+	UserID    string    `json:"user_id" db:"user_id"`       // Foreign key referencing User
+	Content   string    `json:"content" db:"content"`       // Comment content
+	CreatedAt time.Time `json:"created_at" db:"created_at"` // Timestamp for record creation
+}
+
+type CommentResponse struct {
+	ID        uint   `json:"id" db:"id"`
+	Username  string `json:"username" db:"username"`
+	Content   string `json:"content" db:"content"`
+	CreatedAt string `json:"created_at" db:"created_at"`
+}
+
+func (c *Comment) GetComments(ctx context.Context, postID uint) ([]CommentResponse, error) {
+	query := `
+		SELECT comments.id, users.username, comments.content, comments.created_at
+		FROM comments
+		JOIN users ON comments.user_id = users.id
+		WHERE comments.post_id = $1
+		ORDER BY comments.created_at DESC;
+	`
+
+	var comments []CommentResponse
+	err := db.SelectContext(ctx, &comments, query, postID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch comments: %w", err)
+	}
+
+	return comments, nil
+}
+
+func (c *Comment) CreateComment(ctx context.Context, postID uint, userID string, content string) (CommentResponse, error) {
+	// Check if the post exists
+	checkPostQuery := `SELECT id FROM posts WHERE id = $1;`
+	var existingPostID uint
+	err := db.GetContext(ctx, &existingPostID, checkPostQuery, postID)
+	if err != nil {
+		if errors.Is(sql.ErrNoRows, err) {
+			return CommentResponse{}, fmt.Errorf("post not found")
+		}
+		return CommentResponse{}, fmt.Errorf("failed to validate post existence: %w", err)
+	}
+
+	// Check if the user exists
+	checkUserQuery := `SELECT id FROM users WHERE id = $1;`
+	var existingUserID string
+	err = db.GetContext(ctx, &existingUserID, checkUserQuery, userID)
+	if err != nil {
+		if errors.Is(sql.ErrNoRows, err) {
+			return CommentResponse{}, fmt.Errorf("user not found")
+		}
+		return CommentResponse{}, fmt.Errorf("failed to validate user existence: %w", err)
+	}
+
+	// Insert the comment
+	insertQuery := `
+        INSERT INTO comments (post_id, user_id, content, created_at)
+        VALUES ($1, $2, $3, NOW())
+        RETURNING id, content, created_at;
+    `
+	var comment Comment
+	err = db.GetContext(ctx, &comment, insertQuery, postID, userID, content)
+	if err != nil {
+		return CommentResponse{}, fmt.Errorf("failed to create comment: %w", err)
+	}
+
+	// convert the comment to comment repsonse
+	timestring := timeago.English.Format(comment.CreatedAt)
+	commentResponse := CommentResponse{
+		ID:        comment.ID,
+		Username:  userID,
+		Content:   comment.Content,
+		CreatedAt: timestring,
+	}
+
+	return commentResponse, nil
+}
+
+func (c *Comment) DeleteComment(ctx context.Context, commentID uint, userID string) error {
+	// Verify that the comment belongs to the user
+	checkQuery := `SELECT user_id FROM comments WHERE id = $1;`
+	var commentOwnerID string
+	err := db.GetContext(ctx, &commentOwnerID, checkQuery, commentID)
+	if err != nil {
+		if errors.Is(sql.ErrNoRows, err) {
+			return fmt.Errorf("comment not found")
+		}
+		return fmt.Errorf("failed to verify comment ownership: %w", err)
+	}
+
+	if commentOwnerID != userID {
+		return fmt.Errorf("unauthorized: you are not the owner of this comment")
+	}
+
+	// Delete the comment
+	deleteQuery := `DELETE FROM comments WHERE id = $1;`
+	result, err := db.ExecContext(ctx, deleteQuery, commentID)
+	if err != nil {
+		return fmt.Errorf("failed to delete comment: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("comment not found")
+	}
+
+	return nil
+}
+
+func (c *Comment) GetCommentCount(ctx context.Context, postID int) (int, error) {
+	query := `
+        SELECT COUNT(*)
+        FROM comments
+        WHERE post_id = $1;
+    `
+
+	var count int
+	err := db.GetContext(ctx, &count, query, postID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch comment count: %w", err)
+	}
+	return count, nil
+}
+
+package data
+
+import (
+	"github.com/labstack/echo/v4"
+	"strconv"
+)
+
+type PaginatedFeedQuery struct {
+	Limit    int    `json:"limit" validate:"gte=1,lte=20"`
+	Offset   int    `json:"offset" validate:"gte=0"`
+	SortType string `json:"sortType" validate:"oneof=trend latest"`
+	Sort     string `json:"sort" validate:"oneof=asc desc"`
+}
+
+func (fq *PaginatedFeedQuery) Parse(c echo.Context) error {
+	qs := c.QueryParams()
+
+	// Helper function for parsing integers with default fallback
+	parseInt := func(key string, defaultValue, minValue, maxValue int) int {
+		if val := qs.Get(key); val != "" {
+			if parsed, err := strconv.Atoi(val); err == nil && parsed >= minValue && parsed <= maxValue {
+				return parsed
+			}
+		}
+		return defaultValue
+	}
+
+	// Helper function for parsing strings with default fallback
+	parseString := func(key, defaultValue string, validValues ...string) string {
+		if val := qs.Get(key); val != "" {
+			for _, v := range validValues {
+				if val == v {
+					return val
+				}
+			}
+		}
+		return defaultValue
+	}
+
+	// Parse limit (1–20, default: 10)
+	fq.Limit = parseInt("limit", 10, 1, 20)
+
+	// Parse offset (>= 0, default: 0)
+	fq.Offset = parseInt("offset", 0, 0, int(^uint(0)>>1)) // Max int value for offset
+
+	// Parse sortType (valid: "trend", "latest"; default: "trend")
+	fq.SortType = parseString("sortType", "trend", "trend", "latest")
+
+	// Parse sort (valid: "asc", "desc"; default: "desc")
+	fq.Sort = parseString("sort", "desc", "asc", "desc")
+
+	return nil
+}
+
+package data
+
+import (
+	"github.com/jmoiron/sqlx"
+)
+
+var db *sqlx.DB
+
+func New(dbPool *sqlx.DB) *Models {
+	db = dbPool
+
+	return &Models{
+		Post:    &Post{},
+		Comment: &Comment{},
+		Like:    &Like{},
+	}
+}
+
+type Models struct {
+	Post    PostInterfaces
+	Comment CommentInterfaces
+	Like    LikeInterfaces
+}
+
+package data
+
+import (
+	"context"
+)
+
+type PostInterfaces interface {
+	CreatePost(ctx context.Context, req *CreatePostRequest) (PostResponse, error)
+	GetPaginatedPosts(query PaginatedFeedQuery) ([]PostResponse, error)
+	GetPostDetailWithComments(ctx context.Context, postID uint) (*PostResponse, []*CommentResponse, error)
+	CheckPostByID(ctx context.Context, postID uint) (bool, error)
+	IncrementPostViews(ctx context.Context, postID uint) error
+	DeletePost(ctx context.Context, postID uint) error
+}
+
+type CommentInterfaces interface {
+	GetComments(ctx context.Context, postID uint) ([]CommentResponse, error)
+	GetCommentCount(ctx context.Context, postID int) (int, error)
+	CreateComment(ctx context.Context, postID uint, userID string, content string) (CommentResponse, error)
+	DeleteComment(ctx context.Context, commentID uint, userID string) error
+}
+
+type LikeInterfaces interface {
+	AddLike(ctx context.Context, userID string, postID int) error
+	RemoveLike(ctx context.Context, userID string, postID int) error
+	CountLikes(ctx context.Context, postID int) (int, error)
+}
+
+package handler
+
+import (
+	"database/sql"
+	"github.com/Ahmad-mufied/iducate-community-service/server/middlewares"
+	"github.com/Ahmad-mufied/iducate-community-service/utils"
+	"github.com/labstack/echo/v4"
+	"log"
+	"net/http"
+	"strconv"
+)
+
+func GetUpdatedCommentCountHandler(c echo.Context) error {
+	// Get the post ID from the request parameters
+	postIDParam := c.Param("post_id")
+	postID, err := strconv.Atoi(postIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Fetch the updated comment count for the post
+	count, err := entity.Comment.GetCommentCount(ctx, postID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return the updated comment count as a JSON response
+	return c.JSON(http.StatusOK, map[string]int{"comment_count": count})
+}
+
+func DeleteCommentHandler(c echo.Context) error {
+	userID := middlewares.GetUserID(c)
+
+	// Parse comment ID from URL parameter
+	commentIDParam := c.Param("id")
+	commentID, err := strconv.Atoi(commentIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid comment ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Attempt to delete the comment
+	err = entity.Comment.DeleteComment(ctx, uint(commentID), userID)
+	if err != nil {
+		if err.Error() == "comment not found" {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Comment not found"})
+		}
+		if err.Error() == "unauthorized: you are not the owner of this comment" {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "You are not authorized to delete this comment"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return success message
+	return c.JSON(http.StatusOK, map[string]string{"message": "Comment deleted successfully"})
+}
+
+func CreateCommentHandler(c echo.Context) error {
+
+	userID := middlewares.GetUserID(c)
+
+	// Parse post ID from URL parameter
+	postIDParam := c.Param("post_id")
+	log.Println(postIDParam)
+	postID, err := strconv.Atoi(postIDParam)
+	log.Println(postID)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Parse user ID and content from request body
+	type RequestBody struct {
+		Content string `json:"content" validate:"required"`
+	}
+	var body RequestBody
+	if err := c.Bind(&body); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+	}
+
+	// Validate
+	err = validate.Struct(body)
+	if err != nil {
+		// Format the validation errors
+		errors := utils.FormatValidationErrors(err)
+		return utils.HandleValidationError(c, errors)
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Create the comment
+	comment, err := entity.Comment.CreateComment(ctx, uint(postID), userID, body.Content)
+	if err != nil {
+		if err.Error() == "post not found" {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+		}
+		if err.Error() == "user not found" {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return the created comment as JSON
+	return c.JSON(http.StatusCreated, comment)
+}
+
+package handler
+
+import (
+	"github.com/Ahmad-mufied/iducate-community-service/data"
+	"github.com/Ahmad-mufied/iducate-community-service/server/middlewares"
+	"github.com/Ahmad-mufied/iducate-community-service/utils"
+	"github.com/labstack/echo/v4"
+	"net/http"
+	"strconv"
+)
+
+func GetPaginatedPostsHandler(c echo.Context) error {
+	// Parse query parameters
+	var query data.PaginatedFeedQuery
+	if err := query.Parse(c); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid query parameters"})
+	}
+
+	posts, err := entity.Post.GetPaginatedPosts(query)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return the response
+	return c.JSON(http.StatusOK, posts)
+}
+
+func GetPostDetailHandler(c echo.Context) error {
+	// Get post ID from URL parameter
+	postIDParam := c.Param("id")
+	postID, err := strconv.Atoi(postIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Check if the post exists
+	exists, err := entity.Post.CheckPostByID(ctx, uint(postID))
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+	}
+
+	if !exists {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+	}
+
+	// Fetch post details with comments
+	post, comments, err := entity.Post.GetPostDetailWithComments(ctx, uint(postID))
+	if err != nil {
+		if err.Error() == "post not found" {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Increment views count
+	err = entity.Post.IncrementPostViews(ctx, uint(postID))
+	if err != nil {
+		if err.Error() == "post not found" {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	if post == nil {
+		post = &data.PostResponse{}
+	}
+
+	if comments == nil {
+		comments = []*data.CommentResponse{}
+	}
+
+	// Combine the post and comments into a single response
+	response := struct {
+		data.PostResponse `json:"post"`
+		Comments          []*data.CommentResponse `json:"comments"`
+	}{
+		PostResponse: *post,
+		Comments:     comments,
+	}
+
+	// Return response
+	return c.JSON(http.StatusOK, response)
+}
+
+func CreatePostHandler(c echo.Context) error {
+
+	userID := middlewares.GetUserID(c)
+
+	var req = new(data.CreatePostRequest)
+	req.UserID = userID
+
+	// Bind and validate the request body
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+	}
+	// Validate
+	err := validate.Struct(req)
+	if err != nil {
+		// Format the validation errors
+		errors := utils.FormatValidationErrors(err)
+		return utils.HandleValidationError(c, errors)
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Create the post
+	post, err := entity.Post.CreatePost(ctx, req)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return the created post as JSON
+	return c.JSON(http.StatusCreated, post)
+}
+
+func DeletePostHandler(c echo.Context) error {
+	// Get post ID from URL parameter
+	postIDParam := c.Param("id")
+	postID, err := strconv.Atoi(postIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Check if the post exists
+	exists, err := entity.Post.CheckPostByID(ctx, uint(postID))
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+	}
+
+	if !exists {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+	}
+
+	// Delete the post
+	err = entity.Post.DeletePost(ctx, uint(postID))
+	if err != nil {
+		if err.Error() == "no post found with the given ID" {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Post not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return success message
+	return c.JSON(http.StatusOK, map[string]string{"message": "Post deleted successfully"})
+}
+
+package handler
+
+import (
+	"github.com/Ahmad-mufied/iducate-community-service/server/middlewares"
+	"github.com/labstack/echo/v4"
+	"net/http"
+	"strconv"
+)
+
+func LikePostHandler(c echo.Context) error {
+
+	// Get the user ID from middleware
+	userID := middlewares.GetUserID(c)
+
+	// Get the post ID from the request
+	postIDParam := c.Param("post_id") // Assume post ID is passed as a route parameter
+
+	postID, err := strconv.Atoi(postIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Add like
+	err = entity.Like.AddLike(ctx, userID, postID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return success message
+	return c.JSON(http.StatusOK, map[string]string{"message": "Post liked successfully"})
+}
+
+func UnlikePostHandler(c echo.Context) error {
+	// Get the user ID from middleware
+	userID := middlewares.GetUserID(c)
+
+	// Get the user ID and post ID from the request
+	postIDParam := c.Param("post_id") // Assume post ID is passed as a route parameter
+
+	postID, err := strconv.Atoi(postIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Remove like
+	err = entity.Like.RemoveLike(ctx, userID, postID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return success message
+	return c.JSON(http.StatusOK, map[string]string{"message": "Post unliked successfully"})
+}
+
+func GetLikesCountHandler(c echo.Context) error {
+	// Get the post ID from the request
+	postIDParam := c.Param("post_id") // Assume post ID is passed as a route parameter
+
+	postID, err := strconv.Atoi(postIDParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid post ID"})
+	}
+
+	// Use the request's context
+	ctx := c.Request().Context()
+
+	// Count likes
+	likeCount, err := entity.Like.CountLikes(ctx, postID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Return like count
+	return c.JSON(http.StatusOK, map[string]int{"like_count": likeCount})
+}
+
+package handler
+
+import (
+	"github.com/Ahmad-mufied/iducate-community-service/data"
+	"github.com/go-playground/validator/v10"
+)
+
+var entity *data.Models
+var validate *validator.Validate
+
+func InitHandler(m *data.Models, v *validator.Validate) {
+	entity = m
+	validate = v
+}
+
+
+package middlewares
+
+import (
+	"errors"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/labstack/echo/v4"
+	"strings"
+	"time"
+)
+
+// CognitoJWTMiddleware extracts and parses the Cognito ID token from headers
+func CognitoJWTMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Extract ID token from headers
+			idToken := c.Request().Header.Get("id_token")
+			if idToken == "" {
+				return echo.NewHTTPError(401, "Missing id_token in headers")
+			}
+
+			// Decode token without signature verification
+			claims, err := decodeIDToken(idToken)
+			if err != nil {
+				return echo.NewHTTPError(401, err.Error())
+			}
+
+			// Set token claims in context for later use
+			c.Set("token_claims", claims)
+			c.Set("user_id", claims["sub"])
+			c.Set("name", claims["name"])
+
+			return next(c)
+		}
+	}
+}
+
+// decodeIDToken decodes the JWT token without signature verification
+func decodeIDToken(tokenString string) (jwt.MapClaims, error) {
+	// Remove "Bearer " prefix if present
+	tokenString = strings.TrimPrefix(tokenString, "Bearer ")
+
+	// Parse token without signature verification
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return nil, errors.New("invalid id_token")
+	}
+
+	// Type assert to get claims
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("unable to extract claims")
+	}
+
+	// Optional: Check token expiration manually
+	if exp, ok := claims["exp"].(float64); ok {
+		if jwt.NewNumericDate(time.Now()).Unix() > int64(exp) {
+			return nil, errors.New("id_token has expired")
+		}
+	}
+
+	return claims, nil
+}
+
+// Helper function to get user ID from context
+func GetUserID(c echo.Context) string {
+	userID, ok := c.Get("user_id").(string)
+	if !ok {
+		return ""
+	}
+	return userID
+}
+
+// Helper function to get username from context
+func GetUsername(c echo.Context) string {
+	username, ok := c.Get("name").(string)
+	if !ok {
+		return ""
+	}
+	return username
+}
+
+package server
+
+import (
+	"github.com/Ahmad-mufied/iducate-community-service/server/handler"
+	"github.com/Ahmad-mufied/iducate-community-service/server/middlewares"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+)
+
+func Routes(e *echo.Echo) {
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+
+	e.GET("/posts", handler.GetPaginatedPostsHandler) // Get paginated and sorted list of posts
+	e.GET("/posts/:id", handler.GetPostDetailHandler)
+
+	e.POST("/posts", handler.CreatePostHandler, middlewares.CognitoJWTMiddleware())       // Create a new post
+	e.DELETE("/posts/:id", handler.DeletePostHandler, middlewares.CognitoJWTMiddleware()) // Delete a post by ID
+
+	// Commnet
+	commentGroup := e.Group("/comments")
+	commentGroup.GET("/post/:post_id", handler.GetUpdatedCommentCountHandler) // Get comments for a post
+	// Comment a post
+	commentGroup.POST("/post/:post_id", handler.CreateCommentHandler, middlewares.CognitoJWTMiddleware()) // Get paginated comments for a post
+	// Delete a comment
+	e.DELETE("/comments/:id", handler.DeleteCommentHandler, middlewares.CognitoJWTMiddleware()) // Delete a comment by ID
+
+	// Like a post
+	// Group by like route
+	likesGroup := e.Group("/likes")
+
+	likesGroup.GET("/post/:post_id", handler.GetLikesCountHandler)                                     // Get total likes for a post
+	likesGroup.POST("/post/:post_id", handler.LikePostHandler, middlewares.CognitoJWTMiddleware())     // Like a post
+	likesGroup.DELETE("/post/:post_id", handler.UnlikePostHandler, middlewares.CognitoJWTMiddleware()) // Unlike a post
+
+}
+
+
+package main
+
+import (
+	"context"
+	"errors"
+	"github.com/Ahmad-mufied/iducate-community-service/config"
+	"github.com/Ahmad-mufied/iducate-community-service/data"
+	"github.com/Ahmad-mufied/iducate-community-service/server"
+	"github.com/Ahmad-mufied/iducate-community-service/server/handler"
+	"github.com/go-playground/validator/v10"
+	"github.com/labstack/echo/v4"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"time"
+)
+
+func main() {
+	postgresDb := config.InitDB()
+
+	dbModel := data.New(postgresDb)
+	validate := validator.New()
+	handler.InitHandler(dbModel, validate)
+
+	startAndGracefullyStopServer(echo.New())
+
+}
+
+func startAndGracefullyStopServer(e *echo.Echo) {
+	// Register routes
+	server.Routes(e)
+
+	env := config.Viper.GetString("APP_ENV")
+	port := "8080"
+
+	if env == "production" {
+		log.Println("Running in production mode")
+		port = config.Viper.GetString("PORT")
+	} else {
+		log.Println("Running in development mode")
+	}
+
+	log.Printf("Starting server on port %s...", port)
+
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: e,
+	}
+
+	go func() {
+		if err := e.StartServer(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt)
+	<-quit
+
+	log.Println("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("Server exiting")
+}
+
+
+
+
+
+
+
+
+

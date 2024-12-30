@@ -1,0 +1,275 @@
+openapi: 3.0.0
+info:
+  title: Golang Community App API
+  description: API documentation for a community-based application using Golang and Echo framework.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /posts:
+    get:
+      summary: Get paginated posts
+      description: Retrieve a list of posts with pagination and sorting options.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+          description: Number of posts to retrieve.
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+          description: Starting point for pagination.
+        - name: sortType
+          in: query
+          required: false
+          schema:
+            type: string
+            default: trend
+            enum: [trend, latest]
+          description: Sort by trend or latest.
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            default: desc
+            enum: [asc, desc]
+          description: Sort order.
+      responses:
+        '200':
+          description: A list of posts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PostResponse'
+    post:
+      summary: Create a new post
+      description: Create a new post (authenticated users only).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+      responses:
+        '201':
+          description: Post created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostResponse'
+  /posts/{id}:
+    get:
+      summary: Get post details
+      description: Retrieve a single post's details along with its comments.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      responses:
+        '200':
+          description: Post details with comments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  post:
+                    $ref: '#/components/schemas/PostResponse'
+                  comments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CommentResponse'
+    delete:
+      summary: Delete a post
+      description: Delete a post by its ID (authenticated users only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      responses:
+        '200':
+          description: Post deleted successfully.
+  /comments/post/{post_id}:
+    get:
+      summary: Get comments by post ID
+      description: Retrieve all comments for a specific post.
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      responses:
+        '200':
+          description: List of comments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comment_count:
+                    type: integer
+    post:
+      summary: Create a comment
+      description: Add a comment to a post (authenticated users only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommentRequest'
+      responses:
+        '201':
+          description: Comment created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommentResponse'
+  /comments/{id}:
+    delete:
+      summary: Delete a comment
+      description: Delete a comment by its ID (authenticated users only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Comment ID.
+      responses:
+        '200':
+          description: Comment deleted successfully.
+  /likes/post/{post_id}:
+    get:
+      summary: Get likes count
+      description: Retrieve the total likes count for a post.
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      responses:
+        '200':
+          description: Total likes count.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  like_count:
+                    type: integer
+    post:
+      summary: Like a post
+      description: Like a post (authenticated users only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      responses:
+        '200':
+          description: Post liked successfully.
+    delete:
+      summary: Unlike a post
+      description: Unlike a post (authenticated users only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Post ID.
+      responses:
+        '200':
+          description: Post unliked successfully.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    PostResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        content:
+          type: string
+        views:
+          type: integer
+        author:
+          type: string
+        like_count:
+          type: integer
+        comment_count:
+          type: integer
+        created_at:
+          type: string
+    CreatePostRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+    CommentResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        content:
+          type: string
+        created_at:
+          type: string
+    CreateCommentRequest:
+      type: object
+      properties:
+        content:
+          type: string

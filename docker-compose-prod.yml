@@ -1,0 +1,9 @@
+services:
+  app:
+    image: ahmadryzen/iducate-community-service:latest
+    container_name: iducate-community-service
+    restart: always
+    ports:
+      - "4000:8080" # Expose the app on localhost:8080
+    env_file:
+      - .env
